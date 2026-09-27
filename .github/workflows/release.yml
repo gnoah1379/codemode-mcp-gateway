@@ -1,0 +1,97 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux-x86_64
+          - runner: macos-15
+            platform: darwin-arm64
+          - runner: macos-15-intel
+            platform: darwin-x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify tag matches Cargo version
+        run: |
+          python3 - <<'PY'
+          import os, tomllib
+          with open('Cargo.toml', 'rb') as source:
+              version = tomllib.load(source)['package']['version']
+          assert os.environ['GITHUB_REF_NAME'] == f'v{version}', 'tag must match Cargo.toml version'
+          PY
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.93.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci --prefix web
+      - run: npm run build --prefix web
+      - run: cargo test --locked
+      - run: cargo build --release --locked
+      - name: Package binary and checksum
+        shell: bash
+        run: |
+          mkdir -p dist
+          asset="code-mode-mcp-server-${{ matrix.platform }}.tar.gz"
+          tar -czf "dist/$asset" -C target/release code-mode-mcp-server
+          cd dist
+          if command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 "$asset" > "$asset.sha256"
+          else
+            sha256sum "$asset" > "$asset.sha256"
+          fi
+      - name: Smoke test checksum and installer
+        shell: bash
+        run: |
+          temporary_home="$(mktemp -d)"
+          trap 'rm -rf "$temporary_home"' EXIT
+          HOME="$temporary_home" \
+          XDG_CONFIG_HOME="$temporary_home/config" \
+          CODE_MODE_GATEWAY_BIN_DIR="$temporary_home/bin" \
+          CODE_MODE_GATEWAY_RELEASE_BASE="file://$PWD/dist" \
+          sh scripts/install.sh --update
+          "$temporary_home/bin/code-mode-mcp-server" --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.platform }}
+          path: dist/*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+      - name: Add installer
+        run: cp scripts/install.sh dist/install.sh
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes
+          fi
