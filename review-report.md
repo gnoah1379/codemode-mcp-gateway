@@ -81,14 +81,14 @@ Tại thời điểm review ban đầu, project **chưa đạt đầy đủ spec
 
 | Nhóm | Đánh giá |
 | --- | --- |
-| MCP surface, DTO search/execute, YAML typed config, policy cơ bản | Đã triển khai; cần sửa race và error semantics ở trên. |
+| MCP surface, DTO search/execute, YAML typed config, policy cơ bản | Đã triển khai; race policy ở mục 1 đã sửa, error semantics ở mục 4 còn mở. |
 | Sandbox worker, timeout vòng lặp vô hạn, giới hạn output/call | Có implementation và smoke test; các tình huống crash, oversized HTTP response, cancellation race chưa có E2E đầy đủ. |
 | Upstream discovery/refresh | Có pagination và atomic snapshot; thiếu notification handler và refresh nền cho stdio mode. |
-| Auth, config consistency, retention | Chưa đạt đầy đủ do các lỗi mức cao/trung bình nêu trên. |
+| Auth, config consistency, retention | Lỗi auth thiếu token và race reload đã sửa; retention liên tục ở mục 5 và kiểm thử các trường hợp còn lại chưa đạt. |
 | WebUI, SSE, audit/metrics | Có giao diện và API; chưa có browser E2E và canary leak test. |
 | Compatibility | Đã smoke test client cho JavaScript trả kết quả cục bộ; chưa chứng minh end-to-end với nhiều upstream và Streamable HTTP. |
 
-`implementation-report.md` đã nêu nhiều giới hạn kiểm chứng ở cuối tài liệu. Các phát hiện 1–5 ở đây là vấn đề suy ra trực tiếp từ đường code, không chỉ là thiếu test. Chưa chạy test tái hiện riêng cho từng race hoặc lỗi auth trong review này.
+`implementation-report.md` đã nêu nhiều giới hạn kiểm chứng ở cuối tài liệu. Các phát hiện 1–5 được ghi từ đường code tại thời điểm review ban đầu, không chỉ là thiếu test. Sau đó đã có test cho auth thiếu token và reload; race policy ở mục 1 vẫn cần integration test tái hiện khi call chờ permit.
 
 ## Kiểm chứng đã chạy trong lượt review
 
@@ -97,4 +97,4 @@ Tại thời điểm review ban đầu, project **chưa đạt đầy đủ spec
 - `cargo test`: 11 unit tests và 1 MCP integration test pass; 3 benchmark tests bị ignore theo thiết kế.
 - `npm run build --prefix web`: TypeScript build và Vite build pass.
 
-Các kiểm tra này xác nhận code hiện build được, nhưng chưa chứng minh các tiêu chí nghiệm thu còn thiếu trong spec §11. Ưu tiên tiếp theo là sửa phát hiện 1–3 và thêm integration test tái hiện từng lỗi.
+Sau khi bổ sung CLI/service, `cargo test --locked`, `cargo fmt --check`, Clippy, WebUI build và release build đều pass. GitHub Actions đã build, kiểm thử và chạy installer smoke test cho Linux x86_64, macOS arm64 và macOS x86_64; release `v0.1.0` đã xuất bản. Các kiểm tra này chưa chứng minh các tiêu chí nghiệm thu còn thiếu trong spec §11. Ưu tiên tiếp theo là xử lý phát hiện 4–7 và bổ sung integration test cho race policy, retention và upstream refresh.
