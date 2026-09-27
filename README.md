@@ -84,7 +84,37 @@ Quản lý service và cập nhật qua GitHub:
 
 `update` tải installer từ GitHub Releases, xác minh binary mới và khởi động lại service nếu service đang chạy. Nếu `~/.local/bin` đã có trong `PATH`, có thể gọi trực tiếp `code-mode-mcp-server`. Trên Linux, systemd user service tự chạy khi đăng nhập; muốn tiếp tục chạy sau khi đăng xuất cần bật user lingering theo cấu hình hệ thống.
 
-Nếu MCP client tự khởi chạy local stdio server, trỏ client tới binary đã cài và chạy:
+### 🤖 Kết nối Codex CLI
+
+Các bước sau dùng Gateway **đang chạy nền** tại `http://127.0.0.1:8080/mcp`. Dùng **client token**, không dùng admin token. Trong terminal sẽ chạy Codex:
+
+```sh
+export CODE_MODE_GATEWAY_CLIENT_TOKEN="$(~/.local/bin/code-mode-mcp-server token client)"
+codex mcp add code-mode-gateway \
+  --url http://127.0.0.1:8080/mcp \
+  --bearer-token-env-var CODE_MODE_GATEWAY_CLIENT_TOKEN
+codex mcp list
+codex
+```
+
+Codex lưu tên biến môi trường trong cấu hình MCP và đọc token từ biến đó khi kết nối. Khi mở terminal mới để chạy Codex CLI, chạy lại lệnh `export` trước `codex`. Nếu dùng Codex trong ứng dụng hoặc IDE, tiến trình đó cũng cần nhận được biến môi trường này. Xem [OpenAI Docs về MCP trong Codex](https://learn.chatgpt.com/docs/extend/mcp?surface=cli).
+
+### 🟣 Kết nối Claude Code
+
+Thêm Gateway ở scope `user` để dùng trong mọi project Claude Code:
+
+```sh
+claude mcp add --transport http --scope user \
+  code-mode-gateway http://127.0.0.1:8080/mcp \
+  --header "Authorization: Bearer $(~/.local/bin/code-mode-mcp-server token client)"
+claude mcp list
+```
+
+Mở Claude Code và gõ `/mcp` để kiểm tra trạng thái kết nối. Lệnh trên lưu client token trong cấu hình Claude Code của người dùng. Giữ scope `user` vì cấu hình scope `project` có thể được đưa lên Git. Xem [hướng dẫn MCP của Claude Code](https://code.claude.com/docs/en/mcp).
+
+Sau khi kết nối một trong hai client, yêu cầu agent dùng `tools_search` để tìm tool từ upstream và `tools_execute` để gọi tool. Nếu kết nối báo lỗi, kiểm tra `~/.local/bin/code-mode-mcp-server service status`, client token và địa chỉ `/mcp`. Gateway cần có ít nhất một upstream đã cấu hình để tìm được tool thực tế.
+
+MCP client cũng có thể tự khởi chạy một Gateway local qua stdio bằng binary đã cài:
 
 ```sh
 ~/.local/bin/code-mode-mcp-server stdio
