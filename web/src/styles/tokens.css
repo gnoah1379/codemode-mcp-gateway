@@ -1,0 +1,142 @@
+/*
+ * Design tokens. Light is the default; dark applies when the OS prefers it (unless the user
+ * picked light) or when the user explicitly picked dark. Components use only these variables.
+ */
+:root {
+  color-scheme: light;
+
+  --font-sans: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-md: 14px;
+  --text-lg: 16px;
+  --text-xl: 20px;
+  --text-2xl: 24px;
+
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  --sidebar-width: 232px;
+  --topbar-height: 56px;
+
+  --color-bg: #f5f6f8;
+  --color-sidebar: #fbfbfc;
+  --color-surface: #ffffff;
+  --color-surface-2: #f3f4f6;
+  --color-surface-hover: #eef0f3;
+  --color-border: #e3e6ea;
+  --color-border-strong: #cdd3da;
+  --color-text: #15181d;
+  --color-text-2: #3b434e;
+  --color-muted: #667080;
+
+  --color-accent: #0d8a5f;
+  --color-accent-hover: #0a7550;
+  --color-accent-contrast: #ffffff;
+  --color-accent-soft: #e2f4ec;
+  --color-accent-text: #0a7550;
+
+  --color-success: #13804a;
+  --color-success-soft: #e4f5eb;
+  --color-warning: #955800;
+  --color-warning-soft: #fcf1dc;
+  --color-danger: #c22b2b;
+  --color-danger-soft: #fce9e9;
+  --color-info: #1d5ccc;
+  --color-info-soft: #e7effd;
+  --color-neutral: #7a8390;
+  --color-neutral-soft: #eef0f3;
+
+  --color-focus: rgb(13 138 95 / 0.35);
+  --color-backdrop: rgb(15 18 22 / 0.45);
+  --shadow-sm: 0 1px 2px rgb(16 24 40 / 0.06);
+  --shadow-lg: 0 16px 48px rgb(16 24 40 / 0.18);
+}
+
+/* The dark palette is declared twice (explicit choice and OS preference); keep both blocks in sync. */
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --color-bg: #0f1216;
+  --color-sidebar: #13161b;
+  --color-surface: #171b21;
+  --color-surface-2: #1d2229;
+  --color-surface-hover: #232931;
+  --color-border: #2a3039;
+  --color-border-strong: #3b434e;
+  --color-text: #e8ebef;
+  --color-text-2: #c4cad2;
+  --color-muted: #8f98a4;
+
+  --color-accent: #3ecf8e;
+  --color-accent-hover: #5bd9a0;
+  --color-accent-contrast: #062a1b;
+  --color-accent-soft: rgb(62 207 142 / 0.14);
+  --color-accent-text: #5bd9a0;
+
+  --color-success: #4ade80;
+  --color-success-soft: rgb(74 222 128 / 0.13);
+  --color-warning: #fbbf24;
+  --color-warning-soft: rgb(251 191 36 / 0.13);
+  --color-danger: #f87171;
+  --color-danger-soft: rgb(248 113 113 / 0.13);
+  --color-info: #60a5fa;
+  --color-info-soft: rgb(96 165 250 / 0.13);
+  --color-neutral: #8f98a4;
+  --color-neutral-soft: rgb(143 152 164 / 0.14);
+
+  --color-focus: rgb(62 207 142 / 0.4);
+  --color-backdrop: rgb(0 0 0 / 0.6);
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.3);
+  --shadow-lg: 0 16px 48px rgb(0 0 0 / 0.5);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
+
+    --color-bg: #0f1216;
+    --color-sidebar: #13161b;
+    --color-surface: #171b21;
+    --color-surface-2: #1d2229;
+    --color-surface-hover: #232931;
+    --color-border: #2a3039;
+    --color-border-strong: #3b434e;
+    --color-text: #e8ebef;
+    --color-text-2: #c4cad2;
+    --color-muted: #8f98a4;
+
+    --color-accent: #3ecf8e;
+    --color-accent-hover: #5bd9a0;
+    --color-accent-contrast: #062a1b;
+    --color-accent-soft: rgb(62 207 142 / 0.14);
+    --color-accent-text: #5bd9a0;
+
+    --color-success: #4ade80;
+    --color-success-soft: rgb(74 222 128 / 0.13);
+    --color-warning: #fbbf24;
+    --color-warning-soft: rgb(251 191 36 / 0.13);
+    --color-danger: #f87171;
+    --color-danger-soft: rgb(248 113 113 / 0.13);
+    --color-info: #60a5fa;
+    --color-info-soft: rgb(96 165 250 / 0.13);
+    --color-neutral: #8f98a4;
+    --color-neutral-soft: rgb(143 152 164 / 0.14);
+
+    --color-focus: rgb(62 207 142 / 0.4);
+    --color-backdrop: rgb(0 0 0 / 0.6);
+    --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.3);
+    --shadow-lg: 0 16px 48px rgb(0 0 0 / 0.5);
+  }
+}

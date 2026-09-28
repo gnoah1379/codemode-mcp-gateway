@@ -1,5 +1,6 @@
 mod api;
 mod assets;
+mod auth;
 mod cli;
 mod config;
 mod execution;

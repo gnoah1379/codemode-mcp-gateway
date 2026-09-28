@@ -3,8 +3,8 @@ use anyhow::Result;
 use rmcp::{
     ServerHandler, ServiceExt,
     model::{
-        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
-        ListToolsResult, ServerCapabilities, ServerConfig, Tool,
+        CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
+        Implementation, ListToolsResult, ServerCapabilities, ServerConfig, Tool,
     },
     service::{NotificationContext, RequestContext, RoleServer},
     transport::stdio,
@@ -60,7 +60,11 @@ impl ServerHandler for McpGateway {
             execution::description().to_owned(),
             execute_schema(),
         );
-        Ok(ListToolsResult::with_all_items(vec![search, execute]))
+        // Spec 2026-07-28 requires cache hints; the catalog description changes with upstreams
+        // and the endpoint is per-credential, so clients must revalidate and must not share it.
+        Ok(ListToolsResult::with_all_items(vec![search, execute])
+            .with_ttl_ms(0)
+            .with_cache_scope(CacheScope::Private))
     }
 
     async fn call_tool(

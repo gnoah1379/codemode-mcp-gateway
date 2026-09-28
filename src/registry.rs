@@ -376,6 +376,8 @@ fn schema_depth(value: &Value) -> usize {
     }
 }
 
+const INHERITED_ENV: [&str; 7] = ["PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG"];
+
 async fn connect(transport: &UpstreamTransport) -> Result<UpstreamClient> {
     match transport {
         UpstreamTransport::Stdio { command, args, env } => {
@@ -386,14 +388,13 @@ async fn connect(transport: &UpstreamTransport) -> Result<UpstreamClient> {
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null());
-            for (key, reference) in env {
-                process.env(
-                    key,
-                    std::env::var(&reference.from_env).with_context(|| {
-                        format!("missing environment variable {}", reference.from_env)
-                    })?,
-                );
+            // Other gateway variables stay hidden; these let launchers like npx or docker run.
+            for key in INHERITED_ENV {
+                if let Some(value) = std::env::var_os(key) {
+                    process.env(key, value);
+                }
             }
+            process.envs(env);
             let transport =
                 BoundedChildTransport::spawn(process).context("failed to start stdio upstream")?;
             ().serve(transport)
@@ -402,14 +403,10 @@ async fn connect(transport: &UpstreamTransport) -> Result<UpstreamClient> {
         }
         UpstreamTransport::StreamableHttp { url, headers } => {
             let mut resolved = HashMap::new();
-            for (name, reference) in headers {
+            for (name, value) in headers {
                 let name =
                     HeaderName::from_bytes(name.as_bytes()).context("invalid HTTP header name")?;
-                let value =
-                    HeaderValue::from_str(&std::env::var(&reference.from_env).with_context(
-                        || format!("missing environment variable {}", reference.from_env),
-                    )?)
-                    .context("invalid HTTP header value")?;
+                let value = HeaderValue::from_str(value).context("invalid HTTP header value")?;
                 resolved.insert(name, value);
             }
             let cfg = StreamableHttpClientTransportConfig::with_uri(url.as_str())

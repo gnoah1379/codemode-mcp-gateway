@@ -3,8 +3,8 @@ server:
   listen: "127.0.0.1:8080"
   mcp_path: "/mcp"
   auth:
-    client_token_env: GATEWAY_CLIENT_TOKEN
-    admin_token_env: GATEWAY_ADMIN_TOKEN
+    client_enabled: true
+    admin_enabled: true
 upstreams: {}
 search:
   provider: keyword

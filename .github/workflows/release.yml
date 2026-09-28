@@ -48,7 +48,7 @@ jobs:
         run: |
           mkdir -p dist
           asset="code-mode-mcp-server-${{ matrix.platform }}.tar.gz"
-          tar -czf "dist/$asset" -C target/release code-mode-mcp-server
+          tar -czf "dist/$asset" -C target/release codemode
           cd dist
           if command -v shasum >/dev/null 2>&1; then
             shasum -a 256 "$asset" > "$asset.sha256"
@@ -65,7 +65,7 @@ jobs:
           CODE_MODE_GATEWAY_BIN_DIR="$temporary_home/bin" \
           CODE_MODE_GATEWAY_RELEASE_BASE="file://$PWD/dist" \
           sh scripts/install.sh --update
-          "$temporary_home/bin/code-mode-mcp-server" --version
+          "$temporary_home/bin/codemode" --version
       - uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.platform }}

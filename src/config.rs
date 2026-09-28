@@ -28,11 +28,28 @@ pub struct ServerConfig {
     #[serde(default)]
     pub auth: AuthConfig,
 }
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthConfig {
+    #[serde(default = "default_true")]
+    pub client_enabled: bool,
+    #[serde(default = "default_true")]
+    pub admin_enabled: bool,
+    #[serde(default, skip_serializing)]
     pub client_token_env: Option<String>,
+    #[serde(default, skip_serializing)]
+    #[allow(dead_code)] // Accepted only to read configurations written by older releases.
     pub admin_token_env: Option<String>,
+}
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            client_enabled: true,
+            admin_enabled: true,
+            client_token_env: None,
+            admin_token_env: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -51,18 +68,13 @@ pub enum UpstreamTransport {
         #[serde(default)]
         args: Vec<String>,
         #[serde(default)]
-        env: BTreeMap<String, EnvReference>,
+        env: BTreeMap<String, String>,
     },
     StreamableHttp {
         url: String,
         #[serde(default)]
-        headers: BTreeMap<String, EnvReference>,
+        headers: BTreeMap<String, String>,
     },
-}
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct EnvReference {
-    pub from_env: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -325,31 +337,9 @@ impl Config {
             bail!("invalid observability.log_level");
         }
         let listen: std::net::SocketAddr = self.server.listen.parse().expect("validated above");
-        for env_name in [
-            self.server.auth.client_token_env.as_deref(),
-            self.server.auth.admin_token_env.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            validate_env_name("server.auth", env_name)?;
-        }
         if !listen.ip().is_loopback() {
-            for env_name in [
-                self.server.auth.client_token_env.as_deref(),
-                self.server.auth.admin_token_env.as_deref(),
-            ] {
-                let Some(env_name) = env_name.filter(|name| !name.trim().is_empty()) else {
-                    bail!(
-                        "remote listeners require both client and admin token environment references"
-                    );
-                };
-                if std::env::var(env_name)
-                    .map(|token| token.len() < 32)
-                    .unwrap_or(true)
-                {
-                    bail!("remote listeners require authentication tokens of at least 32 bytes");
-                }
+            if !self.server.auth.client_enabled || !self.server.auth.admin_enabled {
+                bail!("remote listeners require client and admin authentication enabled");
             }
             if std::env::var("GATEWAY_TLS_TERMINATED").ok().as_deref() != Some("true") {
                 bail!("remote listeners require TLS termination and GATEWAY_TLS_TERMINATED=true");
@@ -416,10 +406,12 @@ impl Config {
                     if command.trim().is_empty() {
                         bail!("upstream {name} command is empty");
                     }
-                    for key in env.keys() {
+                    for (key, value) in env {
                         validate_env_name(name, key)?;
+                        if value.contains('\0') {
+                            bail!("upstream {name} environment variable {key} contains a NUL byte");
+                        }
                     }
-                    validate_references(name, env.values())?;
                 }
                 UpstreamTransport::StreamableHttp { url, headers } => {
                     let parsed = url::Url::parse(url).context("invalid upstream URL")?;
@@ -440,11 +432,13 @@ impl Config {
                     if parsed.scheme() != "https" && !loopback {
                         bail!("upstream {name} must use HTTPS unless it is loopback");
                     }
-                    for header in headers.keys() {
+                    for (header, value) in headers {
                         http::HeaderName::from_bytes(header.as_bytes())
                             .context("invalid upstream HTTP header name")?;
+                        if http::HeaderValue::from_str(value).is_err() {
+                            bail!("upstream {name} header {header} has an invalid value");
+                        }
                     }
-                    validate_references(name, headers.values())?;
                 }
             }
         }
@@ -455,15 +449,6 @@ impl Config {
     }
 }
 
-fn validate_references<'a>(
-    upstream: &str,
-    refs: impl Iterator<Item = &'a EnvReference>,
-) -> anyhow::Result<()> {
-    for reference in refs {
-        validate_env_name(upstream, &reference.from_env)?;
-    }
-    Ok(())
-}
 fn validate_env_name(scope: &str, name: &str) -> anyhow::Result<()> {
     let mut bytes = name.bytes();
     let Some(first) = bytes.next() else {
@@ -606,5 +591,23 @@ server:
 "#;
 
         assert!(parse(duplicate).is_err());
+    }
+
+    #[test]
+    fn legacy_token_references_are_read_but_not_written() {
+        let legacy = include_str!("../config.yaml")
+            .replace(
+                "client_enabled: true",
+                "client_token_env: GATEWAY_CLIENT_TOKEN",
+            )
+            .replace(
+                "admin_enabled: true",
+                "admin_token_env: GATEWAY_ADMIN_TOKEN",
+            );
+        let config = parse(&legacy).unwrap();
+        assert!(config.server.auth.client_enabled);
+        assert!(config.server.auth.admin_enabled);
+        let serialized = serde_yaml::to_string(&config).unwrap();
+        assert!(!serialized.contains("_token_env"));
     }
 }

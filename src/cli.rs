@@ -1,15 +1,11 @@
-use crate::{api, config, execution, mcp, service, state};
+use crate::{api, auth, config, execution, mcp, service, state};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use std::{env, fs, path::PathBuf, process::Command, sync::Arc};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
-#[command(
-    name = "code-mode-mcp-server",
-    version,
-    about = "Code Mode MCP Gateway"
-)]
+#[command(name = "codemode", version, about = "Code Mode MCP Gateway")]
 pub struct Cli {
     /// YAML configuration path
     #[arg(long, global = true)]
@@ -34,8 +30,13 @@ pub enum GatewayCommand {
         #[command(subcommand)]
         action: ServiceAction,
     },
-    /// Print one generated service token
+    /// Print the persisted MCP client API key
     Token { kind: TokenKind },
+    /// Configure or reset the admin account
+    Admin {
+        #[command(subcommand)]
+        action: AdminAction,
+    },
     /// Install the latest binary from GitHub Releases
     Update {
         /// GitHub repository in owner/repo form; defaults to the installed release repository
@@ -60,16 +61,25 @@ pub enum ServiceAction {
 #[derive(Clone, Copy, ValueEnum)]
 pub enum TokenKind {
     Client,
-    Admin,
 }
 
 impl TokenKind {
     fn as_str(self) -> &'static str {
         match self {
             Self::Client => "client",
-            Self::Admin => "admin",
         }
     }
+}
+
+#[derive(Subcommand)]
+pub enum AdminAction {
+    /// Create the initial admin account
+    Setup {
+        #[arg(long)]
+        username: String,
+    },
+    /// Set a new password for the existing admin account
+    ResetPassword,
 }
 
 pub fn run(cli: Cli) -> Result<()> {
@@ -94,6 +104,7 @@ pub fn run(cli: Cli) -> Result<()> {
             ServiceAction::Uninstall => service::uninstall(),
         },
         Some(GatewayCommand::Token { kind }) => service::show_token(kind.as_str(), &config_path),
+        Some(GatewayCommand::Admin { action }) => configure_admin(&config_path, action),
         Some(GatewayCommand::Update { repo }) => update(repo),
         Some(GatewayCommand::ServiceRun) => service::service_exec(&config_path),
         Some(GatewayCommand::Stdio) => serve(config_path, true),
@@ -107,7 +118,11 @@ fn serve(config_path: PathBuf, stdio: bool) -> Result<()> {
         .build()?;
     runtime.block_on(async move {
         let loaded = config::load(&config_path)
-            .context("failed to load config; run `code-mode-mcp-server init` first")?;
+            .context("failed to load config; run `codemode init` first")?;
+        if !stdio && loaded.server.auth.admin_enabled {
+            let db = auth::open(&config_path, &loaded)?;
+            setup_admin_if_interactive(&db, &config_path)?;
+        }
         tracing_subscriber::fmt()
             .with_env_filter(
                 EnvFilter::try_from_default_env()
@@ -122,6 +137,65 @@ fn serve(config_path: PathBuf, stdio: bool) -> Result<()> {
             api::serve(gateway).await
         }
     })
+}
+
+fn configure_admin(config_path: &std::path::Path, action: AdminAction) -> Result<()> {
+    let loaded = config::load(config_path)?;
+    let db = auth::open(config_path, &loaded)?;
+    match action {
+        AdminAction::Setup { username } => prompt_and_set_admin(&db, &username, false),
+        AdminAction::ResetPassword => {
+            let username: String = db
+                .query_row(
+                    "SELECT value FROM credentials WHERE name='admin_username'",
+                    [],
+                    |row| row.get(0),
+                )
+                .context("admin account is not configured")?;
+            prompt_and_set_admin(&db, &username, true)
+        }
+    }
+}
+
+fn prompt_username() -> Result<String> {
+    use std::io::Write;
+    print!("Admin username: ");
+    std::io::stdout().flush()?;
+    let mut username = String::new();
+    std::io::stdin().read_line(&mut username)?;
+    Ok(username.trim().to_owned())
+}
+
+pub(crate) fn setup_admin_if_interactive(
+    db: &rusqlite::Connection,
+    config_path: &std::path::Path,
+) -> Result<()> {
+    if auth::admin_exists(db)? {
+        return Ok(());
+    }
+    if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        bail!(
+            "admin account is not configured; run `codemode --config {} admin setup --username <name>`",
+            config_path.display()
+        );
+    }
+    println!("First run: create the admin account.");
+    let username = prompt_username()?;
+    prompt_and_set_admin(db, &username, false)
+}
+
+fn prompt_and_set_admin(db: &rusqlite::Connection, username: &str, reset: bool) -> Result<()> {
+    if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        bail!("admin password must be entered in an interactive terminal");
+    }
+    let password = rpassword::prompt_password("Admin password (at least 12 characters): ")?;
+    let confirm = rpassword::prompt_password("Confirm admin password: ")?;
+    if password != confirm {
+        bail!("passwords do not match");
+    }
+    auth::set_admin(db, username, &password, reset)?;
+    println!("Admin account configured: {username}");
+    Ok(())
 }
 
 pub fn worker() -> Result<()> {

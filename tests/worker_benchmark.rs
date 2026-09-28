@@ -25,7 +25,7 @@ async fn benchmark_worker_startup_rss_and_concurrency() {
     );
     std::fs::write(&config_path, yaml).unwrap();
 
-    let executable = env!("CARGO_BIN_EXE_code-mode-mcp-server");
+    let executable = env!("CARGO_BIN_EXE_codemode");
     let mut command = Command::new(executable);
     command.args(["--config", config_path.to_str().unwrap(), "--stdio"]);
     let (transport, _stderr) = TokioChildProcess::builder(command)

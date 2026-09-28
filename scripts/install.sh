@@ -47,32 +47,67 @@ curl -fsSL --retry 3 "$base/$asset.sha256" -o "$tmp/$asset.sha256"
   else
     sha256sum -c "$asset.sha256"
   fi
-  tar -xzf "$asset" code-mode-mcp-server
+  tar -xzf "$asset" codemode
 )
+
+# `curl ... | sh` feeds the script through stdin, so first-run prompts read from the terminal instead.
+interactive() {
+  if [ -t 0 ]; then
+    "$@"
+  elif (: </dev/tty) 2>/dev/null; then
+    "$@" </dev/tty
+  else
+    "$@"
+  fi
+}
 
 bin_dir=${CODE_MODE_GATEWAY_BIN_DIR:-"$HOME/.local/bin"}
 mkdir -p "$bin_dir"
-bin="$bin_dir/code-mode-mcp-server"
-staged="$bin_dir/.code-mode-mcp-server.$$"
-cp "$tmp/code-mode-mcp-server" "$staged"
+bin="$bin_dir/codemode"
+staged="$bin_dir/.codemode.$$"
+cp "$tmp/codemode" "$staged"
 chmod 755 "$staged"
 mv -f "$staged" "$bin"
+legacy_bin="$bin_dir/code-mode-mcp-server"
+if [ -e "$legacy_bin" ] || [ -L "$legacy_bin" ]; then
+  rm -f "$legacy_bin"
+  ln -s codemode "$legacy_bin"
+fi
 
-config_dir=${XDG_CONFIG_HOME:-"$HOME/.config"}/code-mode-gateway
+config_home=${XDG_CONFIG_HOME:-"$HOME/.config"}
+config_dir=$config_home/code-mode-gateway
 mkdir -p "$config_dir"
 printf '%s\n' "$repo" > "$config_dir/release-repo"
 
 if [ "$update" -eq 1 ]; then
-  if "$bin" service status >/dev/null 2>&1; then
-    "$bin" service stop
-    "$bin" service start
-    echo "Updated $bin and restarted the service"
+  if [ -f "$config_dir/config.yaml" ]; then
+    interactive "$bin" init
+  fi
+  case "$os" in
+    Darwin) service_file="$HOME/Library/LaunchAgents/com.code-mode-mcp.gateway.plist" ;;
+    Linux) service_file="$config_home/systemd/user/com.code-mode-mcp.gateway.service" ;;
+  esac
+  if [ -f "$service_file" ]; then
+    was_running=0
+    if "$bin" service status >/dev/null 2>&1; then was_running=1; fi
+    "$bin" service install
+    if [ "$was_running" -eq 0 ]; then "$bin" service stop; fi
+    echo "Updated $bin and refreshed the service"
   else
     echo "Updated $bin"
   fi
 else
-  "$bin" init
+  interactive "$bin" init
   "$bin" service install
   echo "Installed $bin and started the background service"
-  echo "Add $bin_dir to PATH if the command is not found in a new shell."
+  case ":$PATH:" in
+    *":$bin_dir:"*) ;;
+    *)
+      echo
+      echo "$bin_dir is not on your PATH. Add this line to your shell profile (~/.zshrc or ~/.bashrc):"
+      echo "  export PATH=\"$bin_dir:\$PATH\""
+      ;;
+  esac
+  echo
+  echo "Manage the gateway at http://127.0.0.1:8080 or run: codemode --help"
 fi

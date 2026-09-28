@@ -1,4 +1,4 @@
-use crate::config;
+use crate::{auth, config};
 use anyhow::{Context, Result, bail};
 use std::{
     env, fs,
@@ -6,7 +6,6 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
 };
-use uuid::Uuid;
 
 const SERVICE_NAME: &str = "com.code-mode-mcp.gateway";
 
@@ -50,35 +49,44 @@ pub fn init(config_path: &Path) -> Result<()> {
     } else {
         println!("Using existing {}", config_path.display());
     }
-    let env_path = parent.join("service.env");
-    if !env_path.exists() {
-        let client = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
-        let admin = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
-        write_private(
-            &env_path,
-            format!("GATEWAY_CLIENT_TOKEN={client}\nGATEWAY_ADMIN_TOKEN={admin}\n").as_bytes(),
-        )?;
-        println!("Created {} (mode 0600)", env_path.display());
+    let candidate = config::load(&config_path)?;
+    let db_path = auth::database_path(&config_path, &candidate);
+    let had_client_key = db_path.exists()
+        && rusqlite::Connection::open_with_flags(
+            &db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .ok()
+        .and_then(|db| auth::client_key(&db).ok())
+        .is_some();
+    let db = auth::open(&config_path, &candidate)?;
+    if !had_client_key && let Some(name) = candidate.server.auth.client_token_env.as_deref() {
+        let legacy_env = parent.join("service.env");
+        if legacy_env.exists()
+            && let Some((_, value)) = parse_env(&legacy_env)?
+                .into_iter()
+                .find(|(key, value)| key == name && value.len() >= 32)
+        {
+            db.execute(
+                "UPDATE credentials SET value=?1 WHERE name='client_api_key'",
+                [value],
+            )?;
+            println!("Migrated MCP client key to SQLite");
+        }
+    }
+    if candidate.server.auth.admin_enabled {
+        crate::cli::setup_admin_if_interactive(&db, &config_path)?;
     }
     Ok(())
 }
 
 pub fn show_token(kind: &str, config_path: &Path) -> Result<()> {
-    let name = match kind {
-        "client" => "GATEWAY_CLIENT_TOKEN",
-        "admin" => "GATEWAY_ADMIN_TOKEN",
-        _ => bail!("token kind must be client or admin"),
-    };
-    let path = absolute(config_path)?
-        .parent()
-        .context("configuration path has no parent")?
-        .join("service.env");
-    let value = parse_env(&path)?
-        .into_iter()
-        .find(|(key, _)| key == name)
-        .map(|(_, value)| value)
-        .with_context(|| format!("{name} is not in {}", path.display()))?;
-    println!("{value}");
+    if kind != "client" {
+        bail!("only the client API key is available");
+    }
+    let candidate = config::load(config_path)?;
+    let db = auth::open(config_path, &candidate)?;
+    println!("{}", auth::client_key(&db)?);
     Ok(())
 }
 
@@ -93,8 +101,10 @@ pub fn service_exec(config_path: &Path) -> Result<()> {
             .join("service.env");
         let mut command = Command::new(binary);
         command.arg("--config").arg(config_path);
-        for (key, value) in parse_env(&env_path)? {
-            command.env(key, value);
+        if env_path.exists() {
+            for (key, value) in parse_env(&env_path)? {
+                command.env(key, value);
+            }
         }
         Err(command.exec()).context("could not replace service launcher with gateway")
     }
@@ -109,17 +119,13 @@ pub fn install(config_path: &Path) -> Result<()> {
     let config_path = absolute(config_path)?;
     init(&config_path)?;
     let candidate = config::load(&config_path)?;
-    let service_env = parse_env(&config_path.parent().unwrap().join("service.env"))?;
-    for required in [
-        candidate.server.auth.client_token_env.as_deref(),
-        candidate.server.auth.admin_token_env.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
+    if candidate.server.auth.admin_enabled
+        && !auth::admin_exists(&auth::open(&config_path, &candidate)?)?
     {
-        if !service_env.iter().any(|(name, _)| name == required) {
-            bail!("service.env is missing configured token variable {required}");
-        }
+        bail!(
+            "admin account is not configured; run `codemode --config {} admin setup --username <name>`",
+            config_path.display()
+        );
     }
     let binary = env::current_exe()?;
     if cfg!(target_os = "macos") {
@@ -223,6 +229,7 @@ fn install_systemd(binary: &Path, config_path: &Path) -> Result<()> {
         systemd_quote(binary)?,
         systemd_quote(config_path)?
     );
+    let _ = stop();
     fs::write(&path, unit)?;
     run("systemctl", &["--user", "daemon-reload"])?;
     run("systemctl", &["--user", "enable", "--now", SERVICE_NAME])?;
@@ -274,11 +281,6 @@ fn parse_env(path: &Path) -> Result<Vec<(String, String)>> {
             bail!("invalid service credential");
         }
         values.push((name.to_owned(), value.to_owned()));
-    }
-    for required in ["GATEWAY_CLIENT_TOKEN", "GATEWAY_ADMIN_TOKEN"] {
-        if values.iter().filter(|(name, _)| name == required).count() != 1 {
-            bail!("service.env must contain exactly one {required}");
-        }
     }
     Ok(values)
 }
@@ -354,18 +356,14 @@ mod tests {
             std::env::temp_dir().join(format!("gateway-service-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&directory).unwrap();
         let path = directory.join("service.env");
-        write_private(&path, b"GATEWAY_CLIENT_TOKEN=client\nGATEWAY_ADMIN_TOKEN=admin\nUPSTREAM_AUTH=Bearer example\n").unwrap();
+        write_private(&path, b"UPSTREAM_AUTH=Bearer example\n").unwrap();
         let values = parse_env(&path).unwrap();
         assert!(
             values
                 .iter()
                 .any(|(name, value)| name == "UPSTREAM_AUTH" && value == "Bearer example")
         );
-        fs::write(
-            &path,
-            "GATEWAY_CLIENT_TOKEN=a\nGATEWAY_CLIENT_TOKEN=b\nGATEWAY_ADMIN_TOKEN=c\n",
-        )
-        .unwrap();
+        fs::write(&path, "UPSTREAM_AUTH=a\nUPSTREAM_AUTH=b\n").unwrap();
         assert!(parse_env(&path).is_err());
         fs::remove_dir_all(directory).unwrap();
     }

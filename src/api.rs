@@ -1,5 +1,5 @@
 use crate::{
-    assets, config,
+    assets, auth, config,
     mcp::McpGateway,
     policy, registry,
     state::{GatewayEvent, GatewayState},
@@ -182,7 +182,7 @@ async fn put_config(
             return api_error(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "INVALID_CONFIG",
-                "Configuration is invalid.",
+                &config_error_message(&error),
             );
         }
     };
@@ -213,7 +213,7 @@ async fn put_config(
             api_error(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "CONFIG_COMMIT_FAILED",
-                "Configuration could not be prepared or saved.",
+                &format!("Configuration could not be prepared or saved: {error:#}"),
             )
         }
     }
@@ -237,7 +237,7 @@ async fn validate_config(State(_state): State<Arc<GatewayState>>, body: Bytes) -
             api_error(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "INVALID_CONFIG",
-                "Configuration is invalid.",
+                &config_error_message(&error),
             )
         }
     }
@@ -528,22 +528,45 @@ fn to_sse(event: GatewayEvent) -> Event {
         .data(json)
 }
 
-async fn create_session(State(state): State<Arc<GatewayState>>, headers: HeaderMap) -> Response {
-    let supplied = bearer(&headers);
+#[derive(Deserialize)]
+struct LoginRequest {
+    username: String,
+    password: String,
+}
+
+async fn create_session(
+    State(state): State<Arc<GatewayState>>,
+    headers: HeaderMap,
+    body: Option<Json<LoginRequest>>,
+) -> Response {
     let snapshot = state.snapshot().await;
-    let admin_expected = token_from_config(snapshot.config.server.auth.admin_token_env.as_deref());
-    if admin_expected.as_ref().is_some_and(|expected| {
-        !constant_time_equal(supplied.unwrap_or_default().as_bytes(), expected.as_bytes())
-    }) || (admin_expected.is_none()
-        && (snapshot.config.server.auth.admin_token_env.is_some()
-            || !is_loopback_request(&headers)))
-    {
+    if !snapshot.config.server.auth.admin_enabled {
+        return if is_loopback_request(&headers) {
+            Json(json!({"ok":true})).into_response()
+        } else {
+            api_error(
+                StatusCode::UNAUTHORIZED,
+                "UNAUTHORIZED",
+                "Admin authentication is required.",
+            )
+        };
+    }
+    let db = state.db.lock().await;
+    let authenticated = match body {
+        Some(Json(login)) => {
+            auth::verify_admin(&db, &login.username, &login.password).unwrap_or(false)
+        }
+        None => false,
+    };
+    if !authenticated {
         return api_error(
             StatusCode::UNAUTHORIZED,
             "UNAUTHORIZED",
             "Valid admin authentication is required.",
         );
     }
+    let auth_revision = auth::admin_revision(&db).ok().flatten().unwrap_or_default();
+    drop(db);
     let session = uuid::Uuid::new_v4().to_string();
     let csrf = uuid::Uuid::new_v4().to_string();
     let expires_at = now_seconds() + 12 * 60 * 60;
@@ -554,6 +577,7 @@ async fn create_session(State(state): State<Arc<GatewayState>>, headers: HeaderM
         crate::state::AdminSession {
             csrf: csrf.clone(),
             expires_at,
+            auth_revision,
         },
     );
     let secure = headers
@@ -565,9 +589,8 @@ async fn create_session(State(state): State<Arc<GatewayState>>, headers: HeaderM
     let cookie = format!(
         "gateway_session={session}; Path=/api/v1; HttpOnly; SameSite=Strict; Max-Age=43200{secure_attribute}"
     );
-    let csrf_cookie = format!(
-        "gateway_csrf={csrf}; Path=/api/v1; SameSite=Strict; Max-Age=43200{secure_attribute}"
-    );
+    let csrf_cookie =
+        format!("gateway_csrf={csrf}; Path=/; SameSite=Strict; Max-Age=43200{secure_attribute}");
     response
         .headers_mut()
         .append(header::SET_COOKIE, HeaderValue::from_str(&cookie).unwrap());
@@ -602,7 +625,7 @@ async fn delete_session(State(state): State<Arc<GatewayState>>, headers: HeaderM
     );
     response.headers_mut().append(
         header::SET_COOKIE,
-        HeaderValue::from_static("gateway_csrf=; Path=/api/v1; SameSite=Strict; Max-Age=0"),
+        HeaderValue::from_static("gateway_csrf=; Path=/; SameSite=Strict; Max-Age=0"),
     );
     response
 }
@@ -613,17 +636,19 @@ async fn admin_auth(
     next: Next,
 ) -> Response {
     let headers = request.headers();
-    let token = bearer(headers);
     let snapshot = state.snapshot().await;
-    let expected = token_from_config(snapshot.config.server.auth.admin_token_env.as_deref());
-    if expected.as_ref().is_some_and(|expected| {
-        constant_time_equal(token.unwrap_or_default().as_bytes(), expected.as_bytes())
-    }) {
+    if !snapshot.config.server.auth.admin_enabled && is_loopback_request(headers) {
         return next.run(request).await;
     }
     if let Some(session_id) = cookie_value(headers, "gateway_session") {
         let session = state.sessions.lock().await.get(session_id).cloned();
-        if let Some(session) = session.filter(|session| session.expires_at > now_seconds()) {
+        let db = state.db.lock().await;
+        let revision = auth::admin_revision(&db).ok().flatten();
+        drop(db);
+        if let Some(session) = session.filter(|session| {
+            session.expires_at > now_seconds()
+                && revision.as_deref() == Some(session.auth_revision.as_str())
+        }) {
             let safe = matches!(
                 *request.method(),
                 Method::GET | Method::HEAD | Method::OPTIONS
@@ -641,13 +666,6 @@ async fn admin_auth(
                 "CSRF token is missing or invalid.",
             );
         }
-    }
-    if token.is_none()
-        && expected.is_none()
-        && snapshot.config.server.auth.admin_token_env.is_none()
-        && is_loopback_request(headers)
-    {
-        return next.run(request).await;
     }
     api_error(
         StatusCode::UNAUTHORIZED,
@@ -680,9 +698,17 @@ async fn host_origin_and_client_auth(
     }
     let snapshot = state.snapshot().await;
     if request.uri().path() == snapshot.config.server.mcp_path {
-        if let Some(expected) =
-            token_from_config(snapshot.config.server.auth.client_token_env.as_deref())
-        {
+        if snapshot.config.server.auth.client_enabled {
+            let db = state.db.lock().await;
+            let expected = auth::client_key(&db);
+            drop(db);
+            let Ok(expected) = expected else {
+                return api_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "AUTH_NOT_CONFIGURED",
+                    "MCP API key is unavailable.",
+                );
+            };
             if !constant_time_equal(
                 bearer(headers).unwrap_or_default().as_bytes(),
                 expected.as_bytes(),
@@ -693,9 +719,7 @@ async fn host_origin_and_client_auth(
                     "MCP client authentication is required.",
                 );
             }
-        } else if snapshot.config.server.auth.client_token_env.is_some()
-            || !is_loopback_request(headers)
-        {
+        } else if !is_loopback_request(headers) {
             return api_error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "AUTH_NOT_CONFIGURED",
@@ -801,11 +825,6 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
 }
-fn token_from_config(env_name: Option<&str>) -> Option<String> {
-    env_name
-        .and_then(|name| std::env::var(name).ok())
-        .filter(|value| !value.is_empty())
-}
 fn cookie_value<'a>(headers: &'a HeaderMap, key: &str) -> Option<&'a str> {
     let cookies = headers.get(header::COOKIE)?.to_str().ok()?;
     cookies
@@ -829,6 +848,16 @@ fn now_seconds() -> u64 {
         .map(|d| d.as_secs())
         .unwrap_or_default()
 }
+// Validation messages name the offending field so the WebUI can explain a rejected
+// form. Messages never echo upstream env or header values, which may be secrets.
+fn config_error_message(error: &anyhow::Error) -> String {
+    let message: String = format!("Configuration is invalid: {error:#}")
+        .chars()
+        .take(500)
+        .collect();
+    message
+}
+
 fn api_error(status: StatusCode, code: &str, message: &str) -> Response {
     (
         status,

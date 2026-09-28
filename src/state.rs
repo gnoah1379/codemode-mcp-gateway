@@ -1,4 +1,5 @@
 use crate::{
+    auth,
     config::{self, Config},
     execution::ExecutionManager,
     registry::{self, Registry, UpstreamStatus},
@@ -53,6 +54,7 @@ pub struct GatewayState {
 pub struct AdminSession {
     pub csrf: String,
     pub expires_at: u64,
+    pub auth_revision: String,
 }
 
 impl GatewayState {
@@ -74,22 +76,7 @@ impl GatewayState {
             search,
             catalog_description,
         });
-        let configured_db_path = PathBuf::from(&config.observability.database);
-        let db_path = if configured_db_path.is_absolute() {
-            configured_db_path
-        } else {
-            config_path
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .join(configured_db_path)
-        };
-        if let Some(parent) = db_path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!("cannot create database directory {}", parent.display())
-            })?;
-        }
-        let db = Connection::open(&db_path)
-            .with_context(|| format!("cannot open SQLite database {}", db_path.display()))?;
+        let db = auth::open(&config_path, &config)?;
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
             PRAGMA max_page_count=65536; PRAGMA journal_size_limit=67108864;
             CREATE TABLE IF NOT EXISTS executions(id TEXT PRIMARY KEY, started_at TEXT NOT NULL, finished_at TEXT, outcome TEXT NOT NULL, code_bytes INTEGER NOT NULL, output_bytes INTEGER NOT NULL DEFAULT 0, error_code TEXT, revision TEXT NOT NULL, duration_ms INTEGER);
@@ -165,6 +152,9 @@ impl GatewayState {
             anyhow::bail!("REVISION_CONFLICT");
         }
         candidate.validate()?;
+        if candidate.observability.database != previous.config.observability.database {
+            anyhow::bail!("changing observability.database requires a gateway restart");
+        }
         let generation = self.revision_counter.fetch_add(1, Ordering::Relaxed) + 1;
         // Prepare clients and search index before publishing. Offline upstreams remain degraded.
         let registry = Arc::new(registry::prepare(&candidate, generation).await);
@@ -296,7 +286,12 @@ fn atomic_write_config(path: &Path, config: &Config) -> Result<()> {
     fs::create_dir_all(parent)?;
     let tmp = parent.join(format!(".config-{}.tmp", Uuid::new_v4()));
     let result = (|| -> Result<()> {
-        let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        // Upstream env and header values may hold secrets.
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let mut file = options.open(&tmp)?;
         file.write_all(yaml.as_bytes())?;
         file.sync_all()?;
         fs::rename(&tmp, path)
